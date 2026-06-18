@@ -1,0 +1,6 @@
+.git
+node_modules
+bot.log
+bot.err.log
+npm-debug.log*
+*.log

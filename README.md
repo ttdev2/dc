@@ -40,6 +40,27 @@ npm run deploy-commands
 npm start
 ```
 
+## Discloud
+
+O projeto ja tem `discloud.config` na raiz, como a Discloud pede.
+
+Para subir pelo bot da Discloud:
+
+1. Entre no servidor da Discloud.
+2. Compacte a raiz do projeto em `.zip`.
+3. Envie o `.zip` no canal/comando de upload da Discloud.
+4. Confirme que o `.zip` tem `discloud.config`, `package.json`, `src/` e `.env` na raiz.
+
+Para subir pela CLI:
+
+```bash
+npm install -g discloud-cli
+discloud login
+discloud app up
+```
+
+O arquivo `.env` nao vai para o GitHub, mas precisa existir na Discloud. Se usar a integracao GitHub da Discloud, cadastre as variaveis de ambiente no painel da Discloud.
+
 ## Endpoints usados
 
 - `POST /api/transactions/create`
