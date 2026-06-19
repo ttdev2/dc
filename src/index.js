@@ -34,7 +34,7 @@ const CRYPTO_MIN_BRL = 20;
 const CRYPTO_MAX_BRL = 3000;
 
 const pendingWithdrawals = new Map();
-const userWithdrawState = new Map(); // Armazena estado temporário do saque (tipo de chave selecionado)
+const userWithdrawState = new Map();
 let payerProfileCache;
 
 const misticPay = new MisticPayClient(config.misticPay);
@@ -85,24 +85,57 @@ setInterval(cleanupExpiredWithdrawals, 60_000).unref();
 await client.login(config.discord.token);
 
 async function handleCommand(interaction) {
-  if (interaction.commandName === "pix") {
+  const { commandName, options } = interaction;
+
+  if (commandName === "pix") {
     await interaction.showModal(buildPixModal());
     return;
   }
 
-  if (interaction.commandName === "sacar") {
+  if (commandName === "sacar") {
     await handleWithdrawCommand(interaction);
     return;
   }
 
-  if (interaction.commandName === "saldo") {
+  if (commandName === "saldo") {
     await handleBalance(interaction);
+    return;
+  }
+
+  if (commandName === "crypto") {
+    const subcommand = options.getSubcommand();
+    if (subcommand === "taxas") {
+      await handleCryptoFees(interaction);
+    }
+  }
+}
+
+async function handleCryptoFees(interaction) {
+  await interaction.deferReply(ephemeralOptions());
+  try {
+    const response = await misticPay.getCryptoFees();
+    const embed = baseEmbed("Taxas e Cotação Crypto", COLORS.info)
+      .setDescription("Informações atuais para saques em USDT (BEP20).");
+    
+    addCryptoFeeFields(embed, response);
+    
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("withdraw:start_crypto")
+        .setLabel("Sacar USDT agora")
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji("🪙")
+    );
+
+    await interaction.editReply({ embeds: [embed], components: [row] });
+  } catch (error) {
+    await replyWithError(interaction, error);
   }
 }
 
 async function handleWithdrawCommand(interaction) {
   const embed = baseEmbed("Solicitar Saque", COLORS.brand)
-    .setDescription("Escolha abaixo o método que deseja utilizar para o saque.")
+    .setDescription("Escolha o método desejado para realizar o saque.")
     .addFields(
       { name: "Opções", value: "• **Pix:** Transferência instantânea\n• **Crypto:** USDT (BEP20)" }
     );
@@ -139,7 +172,7 @@ async function handleSelectMenu(interaction) {
       );
 
       await interaction.update({
-        content: "Agora selecione o **tipo de chave Pix**:",
+        content: "Selecione o **tipo de chave Pix**:",
         embeds: [],
         components: [row]
       });
@@ -265,11 +298,13 @@ async function createCryptoWithdrawConfirmation(interaction, { amount, destinati
   const validationError = validateCryptoWithdraw({ amount, wallet });
 
   if (validationError) {
-    await interaction.reply({ content: validationError, ...ephemeralOptions() });
+    await (interaction.replied || interaction.deferred ? interaction.editReply({ content: validationError }) : interaction.reply({ content: validationError, ...ephemeralOptions() }));
     return;
   }
 
-  await interaction.deferReply(ephemeralOptions());
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply(ephemeralOptions());
+  }
 
   const feesResponse = await misticPay.getCryptoFees().catch(() => null);
   const pendingId = randomUUID();
@@ -294,12 +329,18 @@ async function createCryptoWithdrawConfirmation(interaction, { amount, destinati
 
   pendingWithdrawals.set(pendingId, pending);
   await interaction.editReply({
+    content: "",
     embeds: [buildWithdrawConfirmEmbed(pending)],
     components: [buildWithdrawConfirmRow(pendingId, "crypto")],
   });
 }
 
 async function handleButton(interaction) {
+  if (interaction.customId === "withdraw:start_crypto") {
+    await interaction.showModal(buildWithdrawModal("crypto", "USDT"));
+    return;
+  }
+
   if (!interaction.customId.startsWith("withdraw:")) return;
 
   const [, action, pendingId] = interaction.customId.split(":");
