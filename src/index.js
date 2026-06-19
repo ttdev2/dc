@@ -9,6 +9,7 @@ import {
   GatewayIntentBits,
   MessageFlags,
   ModalBuilder,
+  StringSelectMenuBuilder,
   TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
@@ -33,6 +34,7 @@ const CRYPTO_MIN_BRL = 20;
 const CRYPTO_MAX_BRL = 3000;
 
 const pendingWithdrawals = new Map();
+const userWithdrawState = new Map(); // Armazena estado temporário do saque (tipo de chave selecionado)
 let payerProfileCache;
 
 const misticPay = new MisticPayClient(config.misticPay);
@@ -67,6 +69,11 @@ client.on("interactionCreate", async (interaction) => {
 
     if (interaction.isButton()) {
       await handleButton(interaction);
+      return;
+    }
+
+    if (interaction.isStringSelectMenu()) {
+      await handleSelectMenu(interaction);
     }
   } catch (error) {
     await replyWithError(interaction, error);
@@ -84,12 +91,68 @@ async function handleCommand(interaction) {
   }
 
   if (interaction.commandName === "sacar") {
-    await interaction.showModal(buildWithdrawModal());
+    await handleWithdrawCommand(interaction);
     return;
   }
 
   if (interaction.commandName === "saldo") {
     await handleBalance(interaction);
+  }
+}
+
+async function handleWithdrawCommand(interaction) {
+  const embed = baseEmbed("Solicitar Saque", COLORS.brand)
+    .setDescription("Escolha abaixo o método que deseja utilizar para o saque.")
+    .addFields(
+      { name: "Opções", value: "• **Pix:** Transferência instantânea\n• **Crypto:** USDT (BEP20)" }
+    );
+
+  const row = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId("withdraw:select_method")
+      .setPlaceholder("Selecione o método de saque")
+      .addOptions([
+        { label: "Pix", value: "pix", description: "Saque via Pix", emoji: "💸" },
+        { label: "Crypto (USDT BEP20)", value: "crypto", description: "Saque via Criptomoeda", emoji: "🪙" },
+      ])
+  );
+
+  await interaction.reply({ embeds: [embed], components: [row], ...ephemeralOptions() });
+}
+
+async function handleSelectMenu(interaction) {
+  if (interaction.customId === "withdraw:select_method") {
+    const method = interaction.values[0];
+    
+    if (method === "pix") {
+      const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId("withdraw:select_pix_type")
+          .setPlaceholder("Selecione o tipo de chave Pix")
+          .addOptions([
+            { label: "CPF", value: "CPF", emoji: "🆔" },
+            { label: "CNPJ", value: "CNPJ", emoji: "🏢" },
+            { label: "E-mail", value: "EMAIL", emoji: "📧" },
+            { label: "Telefone", value: "TELEFONE", emoji: "📱" },
+            { label: "Chave Aleatória", value: "ALEATORIA", emoji: "🔀" },
+          ])
+      );
+
+      await interaction.update({
+        content: "Agora selecione o **tipo de chave Pix**:",
+        embeds: [],
+        components: [row]
+      });
+    } else if (method === "crypto") {
+      await interaction.showModal(buildWithdrawModal("crypto", "USDT"));
+    }
+    return;
+  }
+
+  if (interaction.customId === "withdraw:select_pix_type") {
+    const pixType = interaction.values[0];
+    userWithdrawState.set(interaction.user.id, { pixType });
+    await interaction.showModal(buildWithdrawModal("pix", pixType));
   }
 }
 
@@ -99,66 +162,67 @@ async function handleModalSubmit(interaction) {
     return;
   }
 
-  if (interaction.customId === "withdraw:request") {
-    await handleWithdrawRequest(interaction);
+  if (interaction.customId === "withdraw:modal_pix") {
+    const state = userWithdrawState.get(interaction.user.id);
+    if (!state) {
+      await interaction.reply({ content: "Sessão expirada. Tente novamente.", ...ephemeralOptions() });
+      return;
+    }
+    await handleWithdrawRequest(interaction, "pix", state.pixType);
+    userWithdrawState.delete(interaction.user.id);
+    return;
+  }
+
+  if (interaction.customId === "withdraw:modal_crypto") {
+    await handleWithdrawRequest(interaction, "crypto");
   }
 }
 
 async function handleCreatePix(interaction) {
-  const amount = parseMoney(interaction.fields.getTextInputValue("amount"));
+  const amountInput = interaction.fields.getTextInputValue("amount");
+  const amount = parseMoney(amountInput);
   const description =
     interaction.fields.getTextInputValue("description")?.trim() ||
     `Pix Discord ${interaction.user.username}`;
-  const publicMessage = parseYesNo(interaction.fields.getTextInputValue("publicMessage"));
 
   if (!Number.isFinite(amount) || amount <= 0) {
-    await interaction.reply({ content: "Valor do Pix invalido.", ...ephemeralOptions() });
+    await interaction.reply({ content: "Valor do Pix inválido.", ...ephemeralOptions() });
     return;
   }
 
-  await interaction.deferReply(ephemeralOptions(!publicMessage));
+  await interaction.deferReply(ephemeralOptions(true));
 
-  const payer = await resolveDefaultPayer();
-  const transactionId = `discord-${interaction.id}`;
-  const response = await misticPay.createTransaction({
-    amount,
-    payerName: payer.name,
-    payerDocument: payer.document,
-    transactionId,
-    description,
-    projectWebhook: config.misticPay.projectWebhookUrl,
-  });
+  try {
+    const payer = await resolveDefaultPayer();
+    const transactionId = `discord-${interaction.id}`;
+    const response = await misticPay.createTransaction({
+      amount,
+      payerName: payer.name,
+      payerDocument: payer.document,
+      transactionId,
+      description,
+      projectWebhook: config.misticPay.projectWebhookUrl,
+    });
 
-  await interaction.editReply(buildPixResultPayload(response, amount, transactionId));
+    await interaction.editReply(buildPixResultPayload(response, amount, transactionId));
+  } catch (error) {
+    await replyWithError(interaction, error);
+  }
 }
 
-async function handleWithdrawRequest(interaction) {
-  const kind = normalizeWithdrawKind(interaction.fields.getTextInputValue("method"));
+async function handleWithdrawRequest(interaction, kind, pixType = null) {
   const amount = parseMoney(interaction.fields.getTextInputValue("amount"));
   const destination = interaction.fields.getTextInputValue("destination").trim();
-  const detail = interaction.fields.getTextInputValue("detail")?.trim() || "";
-  const description =
-    interaction.fields.getTextInputValue("description")?.trim() ||
-    `Saque solicitado por ${interaction.user.tag}`;
+  const description = interaction.fields.getTextInputValue("description")?.trim() || `Saque ${kind} via Discord`;
 
   if (kind === "pix") {
-    await createPixWithdrawConfirmation(interaction, { amount, destination, detail, description });
-    return;
-  }
-
-  if (kind === "crypto") {
+    await createPixWithdrawConfirmation(interaction, { amount, destination, pixKeyType: pixType, description });
+  } else if (kind === "crypto") {
     await createCryptoWithdrawConfirmation(interaction, { amount, destination, description });
-    return;
   }
-
-  await interaction.reply({
-    content: "Tipo de saque invalido. Use `pix` ou `crypto`.",
-    ...ephemeralOptions(),
-  });
 }
 
-async function createPixWithdrawConfirmation(interaction, { amount, destination, detail, description }) {
-  const pixKeyType = normalizePixKeyType(detail);
+async function createPixWithdrawConfirmation(interaction, { amount, destination, pixKeyType, description }) {
   const pixKey = normalizePixKey(destination, pixKeyType);
   const validationError = validatePixWithdraw({ amount, pixKey, pixKeyType });
 
@@ -243,7 +307,7 @@ async function handleButton(interaction) {
 
   if (!pending) {
     await interaction.reply({
-      content: "Essa confirmacao expirou ou ja foi usada.",
+      content: "Essa confirmação expirou ou já foi usada.",
       ...ephemeralOptions(),
     });
     return;
@@ -260,7 +324,7 @@ async function handleButton(interaction) {
   if (Date.now() > pending.expiresAt) {
     pendingWithdrawals.delete(pendingId);
     await interaction.update({
-      content: "Confirmacao expirada. Rode `/sacar` novamente.",
+      content: "Confirmação expirada. Use `/sacar` novamente.",
       embeds: [],
       components: [],
     });
@@ -297,15 +361,7 @@ async function handleButton(interaction) {
     );
 
   if (data.transactionId) {
-    embed.addFields({ name: "Transacao", value: String(data.transactionId), inline: true });
-  }
-
-  if (data.jobId) {
-    embed.addFields({ name: "Job", value: String(data.jobId), inline: false });
-  }
-
-  if (data.message) {
-    embed.addFields({ name: "Retorno", value: truncate(String(data.message), 1024), inline: false });
+    embed.addFields({ name: "Transação", value: String(data.transactionId), inline: true });
   }
 
   await interaction.editReply({
@@ -322,8 +378,8 @@ async function handleBalance(interaction) {
   const balance = response?.data?.balance;
 
   const embed = baseEmbed("Saldo MisticPay", COLORS.info)
-    .setDescription("Saldo disponivel para operacoes.")
-    .addFields({ name: "Disponivel", value: formatBrl(Number(balance ?? 0)), inline: true });
+    .setDescription("Seu saldo disponível para operações.")
+    .addFields({ name: "Disponível", value: formatBrl(Number(balance ?? 0)), inline: true });
 
   await interaction.editReply({ embeds: [embed] });
 }
@@ -331,25 +387,27 @@ async function handleBalance(interaction) {
 function buildPixModal() {
   return new ModalBuilder()
     .setCustomId("pix:create")
-    .setTitle("Gerar Pix")
+    .setTitle("Gerar Cobrança Pix")
     .addComponents(
-      modalTextRow("amount", "Valor em reais", "Ex: 25,00", true),
-      modalTextRow("description", "Descricao", "Opcional", false),
-      modalTextRow("publicMessage", "Publico no canal?", "sim ou nao", false),
+      modalTextRow("amount", "Valor (R$)", "Ex: 25,00", true),
+      modalTextRow("description", "Descrição", "Opcional", false),
     );
 }
 
-function buildWithdrawModal() {
-  return new ModalBuilder()
-    .setCustomId("withdraw:request")
-    .setTitle("Sacar")
-    .addComponents(
-      modalTextRow("method", "Tipo", "pix ou crypto", true),
-      modalTextRow("amount", "Valor em reais", "Ex: 50,00", true),
-      modalTextRow("destination", "Destino", "Chave Pix ou wallet 0x...", true),
-      modalTextRow("detail", "Detalhe", "Pix: cpf/cnpj/email/telefone/aleatoria | Crypto: usdt", false),
-      modalTextRow("description", "Descricao", "Opcional", false),
-    );
+function buildWithdrawModal(kind, detail) {
+  const isPix = kind === "pix";
+  const modal = new ModalBuilder()
+    .setCustomId(isPix ? "withdraw:modal_pix" : "withdraw:modal_crypto")
+    .setTitle(`Saque ${isPix ? "Pix" : "Crypto"}`);
+
+  const rows = [
+    modalTextRow("amount", "Valor (R$)", "Ex: 50,00", true),
+    modalTextRow("destination", isPix ? `Chave Pix (${detail})` : "Carteira BEP20", "Digite aqui...", true),
+    modalTextRow("description", "Descrição", "Opcional", false),
+  ];
+
+  modal.addComponents(...rows);
+  return modal;
 }
 
 function modalTextRow(customId, label, placeholder, required, style = TextInputStyle.Short) {
@@ -365,13 +423,13 @@ function modalTextRow(customId, label, placeholder, required, style = TextInputS
 }
 
 function buildWithdrawConfirmRow(pendingId, kind) {
-  const label = kind === "crypto" ? "Confirmar crypto" : "Confirmar Pix";
+  const label = kind === "crypto" ? "Confirmar Saque Crypto" : "Confirmar Saque Pix";
 
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`withdraw:confirm:${pendingId}`)
       .setLabel(label)
-      .setStyle(ButtonStyle.Danger),
+      .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId(`withdraw:cancel:${pendingId}`)
       .setLabel("Cancelar")
@@ -380,17 +438,17 @@ function buildWithdrawConfirmRow(pendingId, kind) {
 }
 
 function buildWithdrawConfirmEmbed(pending) {
-  const embed = baseEmbed("Confirmar saque", COLORS.warning)
-    .setDescription("Confira os dados antes de enviar para a MisticPay.")
+  const embed = baseEmbed("Confirmar Saque", COLORS.warning)
+    .setDescription("Confira os dados abaixo antes de confirmar o saque.")
     .addFields(
       { name: "Tipo", value: pending.summary.typeLabel, inline: true },
       { name: "Valor", value: formatBrl(pending.summary.amount), inline: true },
       { name: pending.summary.destinationLabel, value: pending.summary.destination, inline: false },
     )
-    .setFooter({ text: "Essa confirmacao expira em 2 minutos." });
+    .setFooter({ text: "Esta confirmação expira em 2 minutos." });
 
   if (pending.summary.description) {
-    embed.addFields({ name: "Descricao", value: truncate(pending.summary.description, 1024), inline: false });
+    embed.addFields({ name: "Descrição", value: truncate(pending.summary.description, 1024), inline: false });
   }
 
   if (pending.kind === "crypto" && pending.summary.feesResponse) {
@@ -403,12 +461,12 @@ function buildWithdrawConfirmEmbed(pending) {
 function buildPixResultPayload(response, amount, fallbackTransactionId) {
   const transaction = response?.data ?? {};
   const status = String(transaction.transactionState || "PENDENTE");
-  const embed = baseEmbed("Pix gerado", COLORS.success)
-    .setDescription("Cobranca criada e pronta para pagamento.")
+  const embed = baseEmbed("Pix Gerado", COLORS.success)
+    .setDescription("Sua cobrança foi gerada. Pague usando o QR Code ou o código Copia e Cola.")
     .addFields(
       { name: "Valor", value: formatBrl(amount), inline: true },
       { name: "Status", value: status, inline: true },
-      { name: "Transacao", value: String(transaction.transactionId || fallbackTransactionId), inline: true },
+      { name: "Transação", value: String(transaction.transactionId || fallbackTransactionId), inline: true },
     );
 
   const files = [];
@@ -422,13 +480,10 @@ function buildPixResultPayload(response, amount, fallbackTransactionId) {
   }
 
   const copyPaste = transaction.copyPaste ? String(transaction.copyPaste) : "";
-  const contentParts = [response?.message || "Transacao criada com sucesso."];
+  const contentParts = [];
 
-  if (copyPaste && copyPaste.length <= 1700) {
-    contentParts.push(`Pix copia e cola:\n\`\`\`\n${copyPaste}\n\`\`\``);
-  } else if (copyPaste) {
-    files.push(new AttachmentBuilder(Buffer.from(copyPaste, "utf8"), { name: "pix-copia-e-cola.txt" }));
-    contentParts.push("Pix copia e cola enviado no arquivo anexo.");
+  if (copyPaste) {
+    contentParts.push(`**Pix Copia e Cola:**\n\`\`\`\n${copyPaste}\n\`\`\``);
   }
 
   return {
@@ -444,23 +499,19 @@ function addCryptoFeeFields(embed, response) {
   const fees = data.fees ?? {};
 
   if (quote.brlPerUSD !== undefined) {
-    embed.addFields({ name: "Cotacao", value: `${formatNumber(Number(quote.brlPerUSD))} BRL/USD`, inline: true });
+    embed.addFields({ name: "Cotação", value: `${formatNumber(Number(quote.brlPerUSD))} BRL/USD`, inline: true });
   }
 
   if (fees.platformFeePercentage !== undefined) {
-    embed.addFields({ name: "Taxa plataforma", value: `${fees.platformFeePercentage}%`, inline: true });
+    embed.addFields({ name: "Taxa Plataforma", value: `${fees.platformFeePercentage}%`, inline: true });
   }
 
   if (quote.networkFee !== undefined || fees.networkFee !== undefined) {
     embed.addFields({
-      name: "Taxa rede",
+      name: "Taxa Rede",
       value: formatBrl(Number(quote.networkFee ?? fees.networkFee)),
       inline: true,
     });
-  }
-
-  if (quote.fixedFeeUSDT !== undefined) {
-    embed.addFields({ name: "Taxa fixa", value: `${formatNumber(Number(quote.fixedFeeUSDT))} USDT`, inline: true });
   }
 }
 
@@ -469,33 +520,34 @@ async function replyWithError(interaction, error) {
 
   const message =
     error instanceof MisticPayError
-      ? `Erro da MisticPay: ${error.message}`
-      : `Erro ao processar comando: ${error.message || "erro desconhecido"}`;
+      ? `Erro MisticPay: ${error.message}`
+      : "Ocorreu um erro inesperado ao processar sua solicitação.";
 
-  const payload = { content: message.slice(0, 1900), components: [], embeds: [] };
+  const embed = baseEmbed("Erro", COLORS.danger).setDescription(message);
 
   if (interaction.deferred || interaction.replied) {
-    await interaction.editReply(payload).catch(() => undefined);
+    await interaction.editReply({ embeds: [embed], components: [], files: [] });
   } else {
-    await interaction.reply({ ...payload, ...ephemeralOptions() }).catch(() => undefined);
+    await interaction.reply({ embeds: [embed], ...ephemeralOptions() });
   }
 }
 
 function cleanupExpiredWithdrawals() {
   const now = Date.now();
   for (const [id, pending] of pendingWithdrawals.entries()) {
-    if (pending.expiresAt <= now) pendingWithdrawals.delete(id);
+    if (now > pending.expiresAt) {
+      pendingWithdrawals.delete(id);
+    }
   }
 }
 
 async function resolveDefaultPayer() {
   if (payerProfileCache) return payerProfileCache;
 
-  const configuredDocument = onlyDigits(config.misticPay.defaultPayerDocument || "");
-  if (configuredDocument) {
+  if (config.misticPay.defaultPayerDocument) {
     payerProfileCache = {
       name: config.misticPay.defaultPayerName,
-      document: configuredDocument,
+      document: onlyDigits(config.misticPay.defaultPayerDocument),
     };
     return payerProfileCache;
   }
@@ -506,7 +558,7 @@ async function resolveDefaultPayer() {
 
   if (!document) {
     throw new MisticPayError(
-      "Nao achei documento na conta MisticPay. Preencha MISTICPAY_DEFAULT_PAYER_DOCUMENT no .env para gerar Pix sem pedir CPF no Discord.",
+      "Documento não configurado. Defina MISTICPAY_DEFAULT_PAYER_DOCUMENT no .env.",
     );
   }
 
@@ -522,7 +574,7 @@ function baseEmbed(title, color) {
     .setTitle(title)
     .setColor(color)
     .setTimestamp(new Date())
-    .setFooter({ text: "MisticPay" });
+    .setFooter({ text: "MisticPay - Bot de Pagamentos" });
 }
 
 function makeQrAttachment(dataUri) {
@@ -533,34 +585,27 @@ function makeQrAttachment(dataUri) {
 }
 
 function validatePixWithdraw({ amount, pixKey, pixKeyType }) {
-  if (!Number.isFinite(amount) || amount <= 0) return "Valor de saque invalido.";
-  if (!["CPF", "CNPJ", "EMAIL", "TELEFONE", "CHAVE_ALEATORIA"].includes(pixKeyType)) {
-    return "Tipo de chave Pix invalido. Use: cpf, cnpj, email, telefone ou aleatoria.";
+  if (!Number.isFinite(amount) || amount <= 0) return "Valor de saque inválido.";
+  if (!["CPF", "CNPJ", "EMAIL", "TELEFONE", "ALEATORIA"].includes(pixKeyType)) {
+    return "Tipo de chave Pix inválido.";
   }
-  if (!pixKey) return "Chave Pix obrigatoria.";
-  if (pixKeyType === "CPF" && onlyDigits(pixKey).length !== 11) return "CPF da chave Pix deve ter 11 numeros.";
-  if (pixKeyType === "CNPJ" && onlyDigits(pixKey).length !== 14) return "CNPJ da chave Pix deve ter 14 numeros.";
-  if (pixKeyType === "EMAIL" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(pixKey)) return "Email da chave Pix invalido.";
+  if (!pixKey) return "Chave Pix obrigatória.";
+  if (pixKeyType === "CPF" && onlyDigits(pixKey).length !== 11) return "CPF deve ter 11 números.";
+  if (pixKeyType === "CNPJ" && onlyDigits(pixKey).length !== 14) return "CNPJ deve ter 14 números.";
+  if (pixKeyType === "EMAIL" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(pixKey)) return "E-mail inválido.";
   return null;
 }
 
 function validateCryptoWithdraw({ amount, wallet }) {
   if (!Number.isFinite(amount) || amount < CRYPTO_MIN_BRL || amount > CRYPTO_MAX_BRL) {
-    return `Saque crypto deve ficar entre ${formatBrl(CRYPTO_MIN_BRL)} e ${formatBrl(CRYPTO_MAX_BRL)}.`;
+    return `Saque crypto deve ser entre ${formatBrl(CRYPTO_MIN_BRL)} e ${formatBrl(CRYPTO_MAX_BRL)}.`;
   }
 
   if (!/^0x[a-fA-F0-9]{40}$/.test(wallet)) {
-    return "Wallet invalida. Use um endereco BEP20 no formato 0x + 40 caracteres hexadecimais.";
+    return "Carteira inválida. Use um endereço BEP20 (0x...).";
   }
 
   return null;
-}
-
-function normalizeWithdrawKind(value) {
-  const normalized = String(value).trim().toLowerCase();
-  if (["pix", "p"].includes(normalized)) return "pix";
-  if (["crypto", "cripto", "usdt", "bep20"].includes(normalized)) return "crypto";
-  return normalized;
 }
 
 function normalizePixKey(value, pixKeyType) {
@@ -568,30 +613,6 @@ function normalizePixKey(value, pixKeyType) {
   if (pixKeyType === "CPF" || pixKeyType === "CNPJ") return onlyDigits(trimmed);
   if (pixKeyType === "TELEFONE") return trimmed.replace(/[()\s-]/g, "");
   return trimmed;
-}
-
-function normalizePixKeyType(value) {
-  const normalized = String(value)
-    .trim()
-    .toUpperCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[\s-]/g, "_");
-
-  const aliases = {
-    CPF: "CPF",
-    CNPJ: "CNPJ",
-    EMAIL: "EMAIL",
-    E_MAIL: "EMAIL",
-    TELEFONE: "TELEFONE",
-    CELULAR: "TELEFONE",
-    PHONE: "TELEFONE",
-    ALEATORIA: "CHAVE_ALEATORIA",
-    CHAVE_ALEATORIA: "CHAVE_ALEATORIA",
-    RANDOM: "CHAVE_ALEATORIA",
-  };
-
-  return aliases[normalized] || normalized;
 }
 
 function onlyDigits(value) {
@@ -602,11 +623,6 @@ function parseMoney(value) {
   const clean = String(value).trim().replace(/^R\$\s*/i, "").replace(/\s/g, "");
   const normalized = clean.includes(",") ? clean.replace(/\./g, "").replace(",", ".") : clean;
   return roundMoney(Number(normalized));
-}
-
-function parseYesNo(value) {
-  const normalized = String(value).trim().toLowerCase();
-  return ["s", "sim", "y", "yes", "true", "1", "publico", "publica"].includes(normalized);
 }
 
 function roundMoney(value) {
@@ -632,9 +648,9 @@ function formatPixKeyType(type) {
   const labels = {
     CPF: "CPF",
     CNPJ: "CNPJ",
-    EMAIL: "Email",
+    EMAIL: "E-mail",
     TELEFONE: "Telefone",
-    CHAVE_ALEATORIA: "Chave aleatoria",
+    ALEATORIA: "Chave Aleatória",
   };
 
   return labels[type] || type;
@@ -647,7 +663,7 @@ function maskPixKey(value, type) {
     return `${name.slice(0, 2)}***@${domain}`;
   }
 
-  if (type === "CHAVE_ALEATORIA") {
+  if (type === "ALEATORIA") {
     return `${value.slice(0, 6)}...${value.slice(-4)}`;
   }
 

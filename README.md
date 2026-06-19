@@ -1,71 +1,53 @@
 # Bot Discord MisticPay
 
-Bot em Node.js para operar MisticPay pelo Discord.
+Bot profissional em Node.js para integração com o gateway de pagamentos MisticPay pelo Discord.
 
-## Comandos
+## ✨ Novidades e Melhorias
 
-- `/pix`: abre formulario e gera uma cobranca Pix.
-- `/sacar`: abre formulario para saque Pix ou crypto USDT BEP20.
-- `/saldo`: consulta saldo disponivel na MisticPay.
+- **Interface Visual:** Agora com Embeds mais bonitos e organizados.
+- **Fluxo de Saque:** Novo sistema de menu de seleção (Select Menu) para escolher o tipo de chave Pix.
+- **Privacidade:** O bot não solicita mais informações pessoais ou CPF no Discord para gerar cobranças.
+- **Facilidade:** Sistema de "Pix Copia e Cola" formatado para fácil cópia no celular.
 
-## Como usar
+## 🛠️ Comandos
 
-### Pix
+- `/pix`: Gera uma cobrança Pix instantânea (sem pedir CPF).
+- `/sacar`: Inicia o fluxo de saque via Pix ou Crypto (USDT BEP20).
+- `/saldo`: Consulta o saldo atual da sua conta MisticPay.
 
-Use `/pix` e preencha:
+## 🚀 Como Usar
 
-- Valor
-- Descricao opcional
-- Se a resposta deve ser publica no canal
+### Geração de Pix
+1. Digite `/pix`.
+2. Informe o valor desejado.
+3. O bot gerará o QR Code e o código Copia e Cola automaticamente.
 
-O bot nao pede CPF no Discord. Ele usa o documento cadastrado na conta MisticPay. Se precisar sobrescrever, configure `MISTICPAY_DEFAULT_PAYER_DOCUMENT` no `.env`.
+### Realização de Saques
+1. Digite `/sacar`.
+2. Selecione o método (Pix ou Crypto).
+3. Se escolher Pix, selecione o tipo de chave (CPF, E-mail, etc.).
+4. Informe os dados no formulário que aparecerá.
+5. Confirme os dados no resumo antes de enviar.
 
-### Saque
+## ⚙️ Configuração
 
-Use `/sacar` e preencha:
+Certifique-se de configurar as variáveis no arquivo `.env`:
 
-- Tipo: `pix` ou `crypto`
-- Valor em reais
-- Destino: chave Pix ou wallet `0x...`
-- Detalhe: para Pix use `cpf`, `cnpj`, `email`, `telefone` ou `aleatoria`; para crypto pode deixar `usdt`
-- Descricao opcional
-
-Depois do formulario, o bot mostra uma confirmacao para o proprio usuario. Ao confirmar, o saque e enviado para a MisticPay.
-
-## Rodar
-
-```bash
-npm install
-npm run deploy-commands
-npm start
+```env
+DISCORD_TOKEN=seu_token
+DISCORD_CLIENT_ID=seu_id
+MISTICPAY_CLIENT_ID=seu_id
+MISTICPAY_CLIENT_SECRET=seu_secret
+MISTICPAY_DEFAULT_PAYER_DOCUMENT=cpf_para_gerar_pix
 ```
 
-## Discloud
+## 📦 Deploy na Discloud
 
-O projeto ja tem `discloud.config` na raiz, como a Discloud pede.
+O projeto já está configurado para a [Discloud](https://discloudbot.com/).
 
-Para subir pelo bot da Discloud:
+1. Compacte os arquivos (exceto `node_modules`).
+2. Faça o upload do `.zip`.
+3. Configure as variáveis de ambiente no painel.
 
-1. Entre no servidor da Discloud.
-2. Compacte a raiz do projeto em `.zip`.
-3. Envie o `.zip` no canal/comando de upload da Discloud.
-4. Confirme que o `.zip` tem `discloud.config`, `package.json`, `src/` e `.env` na raiz.
-
-Para subir pela CLI:
-
-```bash
-npm install -g discloud-cli
-discloud login
-discloud app up
-```
-
-O arquivo `.env` nao vai para o GitHub, mas precisa existir na Discloud. Se usar a integracao GitHub da Discloud, cadastre as variaveis de ambiente no painel da Discloud.
-
-## Endpoints usados
-
-- `POST /api/transactions/create`
-- `POST /api/transactions/withdraw`
-- `POST /api/crypto/withdraw-api`
-- `GET /api/crypto/fees`
-- `GET /api/users/balance`
-- `GET /api/users/info`
+---
+Desenvolvido para MisticPay.
